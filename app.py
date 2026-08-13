@@ -205,6 +205,30 @@ def build_object_key(prefix, filename):
     return posixpath.join(clean_prefix(prefix), safe_name)
 
 
+def managed_key(config, relative="", allow_trash=False):
+    """Return a normalized key constrained to the configured application prefix."""
+    base = clean_prefix(config["prefix"])
+    value = (relative or "").replace("\\", "/").strip("/")
+    parts = [part for part in value.split("/") if part]
+    if any(part in (".", "..") for part in parts):
+        raise ValueError("Duong dan khong hop le.")
+    key = posixpath.join(base, *parts) if parts else base
+    trash = f"{base}.trash/"
+    if not allow_trash and key.startswith(trash):
+        raise ValueError("Khong duoc thao tac truc tiep trong thung rac.")
+    return key
+
+
+def relative_key(config, key):
+    base = clean_prefix(config["prefix"])
+    return key[len(base):] if key.startswith(base) else key
+
+
+def copy_then_delete(s3_client, bucket, source, destination):
+    s3_client.copy_object(Bucket=bucket, CopySource={"Bucket": bucket, "Key": source}, Key=destination)
+    s3_client.delete_object(Bucket=bucket, Key=source)
+
+
 def make_presigned_url(s3_client, bucket, key, expires_in):
     return s3_client.generate_presigned_url(
         "get_object",
@@ -503,7 +527,9 @@ def upload():
         if not content_type:
             content_type = mimetypes.guess_type(uploaded_file.filename)[0]
 
-        key = build_object_key(config["prefix"], uploaded_file.filename)
+        directory = request.form.get("directory", "")
+        target_prefix = managed_key(config, directory)
+        key = build_object_key(target_prefix, uploaded_file.filename)
         result = multipart_upload_file(
             s3_client=s3_client,
             bucket=config["bucket"],
@@ -546,20 +572,28 @@ def list_files():
     try:
         config = get_s3_config()
         s3_client = get_s3_client(config["region"])
-        prefix = clean_prefix(config["prefix"])
+        base_prefix = clean_prefix(config["prefix"])
+        directory = request.args.get("directory", "")
+        prefix = clean_prefix(managed_key(config, directory))
         files = []
+        folders = set()
         continuation_token = None
 
         while True:
             params = {
                 "Bucket": config["bucket"],
                 "Prefix": prefix,
+                "Delimiter": "/",
                 "MaxKeys": 1000,
             }
             if continuation_token:
                 params["ContinuationToken"] = continuation_token
 
             response = s3_client.list_objects_v2(**params)
+            for common in response.get("CommonPrefixes", []):
+                folder_key = common.get("Prefix", "")
+                if folder_key and not folder_key.startswith(f"{base_prefix}.trash/") and not folder_key.startswith(f"{base_prefix}.web-compatible/"):
+                    folders.add(folder_key)
             for item in response.get("Contents", []):
                 key = item["Key"]
                 if key.endswith("/") or key.startswith(f"{prefix}.web-compatible/"):
@@ -585,7 +619,8 @@ def list_files():
             continuation_token = response.get("NextContinuationToken")
 
         files.sort(key=lambda item: item["last_modified"], reverse=True)
-        return jsonify({"ok": True, "bucket": config["bucket"], "prefix": prefix, "files": files})
+        folder_items = [{"key": key, "name": key[len(prefix):].rstrip("/")} for key in sorted(folders)]
+        return jsonify({"ok": True, "bucket": config["bucket"], "base_prefix": base_prefix, "prefix": prefix, "directory": directory, "folders": folder_items, "files": files})
     except (RuntimeError, BotoCoreError, ClientError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 500
 
@@ -713,6 +748,34 @@ def download_file():
         return jsonify({"ok": False, "message": str(exc)}), 500
 
 
+@app.post("/share-link")
+def create_share_link():
+    payload = request.get_json(silent=True) or {}
+    key = str(payload.get("key", "")).strip()
+    try:
+        config = get_s3_config()
+        prefix = clean_prefix(config["prefix"])
+        if not key or not key.startswith(prefix) or key.endswith("/"):
+            return jsonify({"ok": False, "message": "Key khong hop le hoac nam ngoai prefix."}), 400
+
+        requested_expiry = int(payload.get("expires_in") or config["url_expiry"])
+        # S3 Signature V4 presigned URLs support a maximum of seven days.
+        expires_in = max(60, min(requested_expiry, 604800))
+        s3_client = get_s3_client(config["region"])
+        url = make_download_url(s3_client, config["bucket"], key, expires_in)
+        return jsonify({
+            "ok": True,
+            "key": key,
+            "url": url,
+            "expires_in": expires_in,
+            "expires_at": int(time.time()) + expires_in,
+        })
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "Thoi han link khong hop le."}), 400
+    except (RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
 @app.post("/download-multiple")
 def download_multiple_files():
     keys = [key.strip() for key in request.form.getlist("keys") if key.strip()]
@@ -780,10 +843,91 @@ def delete_file():
             return jsonify({"ok": False, "message": "Key khong hop le hoac nam ngoai prefix."}), 400
 
         s3_client = get_s3_client(config["region"])
-        deleted_count = delete_s3_objects(s3_client, config["bucket"], normalized_keys)
-        return jsonify({"ok": True, "deleted": deleted_count, "keys": normalized_keys})
+        trash_prefix = f"{prefix}.trash/"
+        moved = []
+        stamp = str(int(time.time() * 1000))
+        for item in normalized_keys:
+            destination = f"{trash_prefix}{stamp}/{relative_key(config, item)}"
+            copy_then_delete(s3_client, config["bucket"], item, destination)
+            moved.append(destination)
+        return jsonify({"ok": True, "deleted": len(moved), "keys": normalized_keys, "trash_keys": moved})
     except (RuntimeError, BotoCoreError, ClientError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.post("/folders")
+def create_folder():
+    payload = request.get_json(silent=True) or {}
+    try:
+        config = get_s3_config()
+        directory = str(payload.get("directory", ""))
+        name = str(payload.get("name", "")).strip().strip("/\\")
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            return jsonify({"ok": False, "message": "Ten thu muc khong hop le."}), 400
+        key = clean_prefix(managed_key(config, posixpath.join(directory, name)))
+        get_s3_client(config["region"]).put_object(Bucket=config["bucket"], Key=key, Body=b"")
+        return jsonify({"ok": True, "key": key})
+    except (ValueError, RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+
+
+@app.post("/move")
+def move_file():
+    payload = request.get_json(silent=True) or {}
+    try:
+        config = get_s3_config()
+        source = str(payload.get("key", "")).strip()
+        base = clean_prefix(config["prefix"])
+        if not source.startswith(base) or source.endswith("/"):
+            return jsonify({"ok": False, "message": "File nguon khong hop le."}), 400
+        destination = managed_key(config, str(payload.get("destination", "")))
+        if destination.endswith("/") or destination == base:
+            return jsonify({"ok": False, "message": "Duong dan dich phai bao gom ten file."}), 400
+        if source == destination:
+            return jsonify({"ok": True, "key": destination})
+        client = get_s3_client(config["region"])
+        copy_then_delete(client, config["bucket"], source, destination)
+        return jsonify({"ok": True, "key": destination})
+    except (ValueError, RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+
+
+@app.get("/trash")
+def list_trash():
+    try:
+        config = get_s3_config()
+        prefix = f"{clean_prefix(config['prefix'])}.trash/"
+        client = get_s3_client(config["region"])
+        items = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=config["bucket"], Prefix=prefix):
+            for item in page.get("Contents", []):
+                rest = item["Key"][len(prefix):]
+                original = rest.split("/", 1)[1] if "/" in rest else rest
+                items.append({"trash_key": item["Key"], "original": original, "size": item.get("Size", 0), "last_modified": item["LastModified"].isoformat()})
+        items.sort(key=lambda item: item["last_modified"], reverse=True)
+        return jsonify({"ok": True, "items": items})
+    except (RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.post("/trash/restore")
+def restore_trash():
+    payload = request.get_json(silent=True) or {}
+    try:
+        config = get_s3_config()
+        trash_key = str(payload.get("trash_key", ""))
+        trash_prefix = f"{clean_prefix(config['prefix'])}.trash/"
+        if not trash_key.startswith(trash_prefix):
+            return jsonify({"ok": False, "message": "Key thung rac khong hop le."}), 400
+        rest = trash_key[len(trash_prefix):]
+        original = rest.split("/", 1)[1] if "/" in rest else ""
+        destination = managed_key(config, original)
+        client = get_s3_client(config["region"])
+        copy_then_delete(client, config["bucket"], trash_key, destination)
+        return jsonify({"ok": True, "key": destination})
+    except (ValueError, RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
 
 
 @app.get("/progress/<progress_id>")

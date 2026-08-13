@@ -17,7 +17,7 @@
 
         <form id="uploadForm" class="uploader">
           <label class="dropzone" for="fileInput">
-            <input id="fileInput" name="file" type="file">
+            <input id="fileInput" name="file" type="file" multiple>
             <span class="drop-icon">+</span>
             <span class="drop-title">Chon file</span>
             <span id="fileName" class="drop-meta">Chua co file nao duoc chon</span>
@@ -38,6 +38,13 @@
         <section id="result" class="result" hidden></section>
 
         <section class="file-section">
+          <div class="folder-bar">
+            <nav id="breadcrumbs" class="breadcrumbs" aria-label="Thu muc hien tai"></nav>
+            <div class="file-toolbar-actions">
+              <button id="createFolderButton" class="secondary-button" type="button">+ Thu muc</button>
+              <button id="trashButton" class="secondary-button" type="button">Thung rac</button>
+            </div>
+          </div>
           <div class="file-toolbar">
             <div>
               <h2>Danh sach file</h2>
@@ -83,8 +90,16 @@
             <p id="transcodeStage">Đang chuẩn bị...</p>
             <small id="transcodeDetail"></small>
           </section>
+          <div id="folderList" class="folder-list"></div>
           <div id="fileList" class="file-list"></div>
           <nav id="pagination" class="pagination" aria-label="Phân trang danh sách file"></nav>
+        </section>
+        <section id="trashPanel" class="trash-panel" hidden>
+          <div class="file-toolbar">
+            <div><h2>Thung rac</h2><p>Khoi phuc file ve vi tri cu.</p></div>
+            <button id="closeTrashButton" class="secondary-button" type="button">Dong</button>
+          </div>
+          <div id="trashList" class="file-list"></div>
         </section>
       </section>
     </main>

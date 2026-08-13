@@ -26,6 +26,13 @@ const fileNameSearch = document.querySelector("#fileNameSearch");
 const mediaTypeFilter = document.querySelector("#mediaTypeFilter");
 const pageSizeSelect = document.querySelector("#pageSizeSelect");
 const pagination = document.querySelector("#pagination");
+const breadcrumbs = document.querySelector("#breadcrumbs");
+const folderList = document.querySelector("#folderList");
+const createFolderButton = document.querySelector("#createFolderButton");
+const trashButton = document.querySelector("#trashButton");
+const trashPanel = document.querySelector("#trashPanel");
+const trashList = document.querySelector("#trashList");
+const closeTrashButton = document.querySelector("#closeTrashButton");
 
 let progressSource = null;
 let allFiles = [];
@@ -33,6 +40,8 @@ let selectedKeys = new Set();
 let currentPage = 1;
 let transcodeSource = null;
 let transcodeRunning = false;
+let currentDirectory = "";
+let currentFolders = [];
 
 const videoExtensions = new Set(["mp4", "mov", "avi", "mkv", "webm", "m4v", "mpeg", "mpg", "3gp"]);
 const imageExtensions = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg", "tif", "tiff", "avif", "heic"]);
@@ -105,8 +114,17 @@ function startProgressStream(progressId) {
 }
 
 function showSelectedFile() {
-  const file = input.files[0];
-  fileName.textContent = file ? `${file.name} (${formatBytes(file.size)})` : "Chua co file nao duoc chon";
+  const files = [...input.files];
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  fileName.textContent = files.length ? `${files.length} file (${formatBytes(total)})` : "Chua co file nao duoc chon";
+}
+
+function renderFolders() {
+  const parts = currentDirectory.split("/").filter(Boolean);
+  const crumbs = ['<button type="button" data-dir="">Goc</button>'];
+  parts.forEach((part, index) => crumbs.push(`<span>/</span><button type="button" data-dir="${escapeHtml(parts.slice(0, index + 1).join("/"))}">${escapeHtml(part)}</button>`));
+  breadcrumbs.innerHTML = crumbs.join("");
+  folderList.innerHTML = currentFolders.map((folder) => `<button type="button" class="folder-card" data-folder="${escapeHtml(folder.name)}"><span>📁</span>${escapeHtml(folder.name)}</button>`).join("");
 }
 
 function formatBytes(bytes) {
@@ -209,6 +227,8 @@ function renderFileList() {
           <div class="file-actions">
             <a class="file-action view-action" href="/play?key=${encodeURIComponent(file.key)}" target="_blank" rel="noreferrer">Xem</a>
             <a class="file-action download-action" href="/download?key=${encodeURIComponent(file.key)}">Tai ve</a>
+            <button class="file-action share-action" type="button" data-key="${escapeHtml(file.key)}">Copy link</button>
+            <button class="file-action move-action" type="button" data-key="${escapeHtml(file.key)}" data-name="${escapeHtml(file.name)}">Doi ten</button>
             <button class="file-action delete-action" type="button" data-key="${escapeHtml(file.key)}">Xoa</button>
           </div>
         </article>
@@ -229,7 +249,7 @@ async function loadFiles() {
   deleteAllButton.disabled = true;
 
   try {
-    const response = await fetch("/files");
+    const response = await fetch(`/files?directory=${encodeURIComponent(currentDirectory)}`);
     const payload = await response.json();
 
     if (!payload.ok) {
@@ -238,6 +258,8 @@ async function loadFiles() {
     }
 
     allFiles = payload.files;
+    currentFolders = payload.folders || [];
+    renderFolders();
     const remainingKeys = new Set(allFiles.map((file) => file.key));
     selectedKeys = new Set([...selectedKeys].filter((key) => remainingKeys.has(key)));
     currentPage = 1;
@@ -256,7 +278,7 @@ async function deleteFiles(keys) {
   }
 
   const label = keys.length === 1 ? "file nay" : `${keys.length} file`;
-  const confirmed = window.confirm(`Xoa ${label}?\n${keys.join("\n")}`);
+  const confirmed = window.confirm(`Chuyen ${label} vao thung rac?\n${keys.join("\n")}`);
   if (!confirmed) {
     return;
   }
@@ -273,7 +295,7 @@ async function deleteFiles(keys) {
     return;
   }
 
-  setResult("ok", `Da xoa ${payload.deleted || keys.length} file.`);
+  setResult("ok", `Da chuyen ${payload.deleted || keys.length} file vao thung rac.`);
   await loadFiles();
 }
 
@@ -305,81 +327,38 @@ dropzone.addEventListener("drop", (event) => {
 form.addEventListener("submit", (event) => {
   event.preventDefault();
 
-  const file = input.files[0];
-  if (!file) {
+  const files = [...input.files];
+  if (!files.length) {
     setResult("error", "Vui long chon file truoc khi upload.");
     return;
   }
 
-  const progressId = makeProgressId();
-  const data = new FormData();
-  data.append("progress_id", progressId);
-  data.append("file", file);
-
   button.disabled = true;
-  button.textContent = "Dang upload...";
+  button.textContent = `Dang upload 0/${files.length}...`;
   result.hidden = true;
-  setProgress(0);
-  setProgressText("Dang gui file len server", "");
-  startProgressStream(progressId);
-
-  const request = new XMLHttpRequest();
-  request.open("POST", "/upload");
-
-  request.upload.addEventListener("progress", (event) => {
-    if (event.lengthComputable) {
-      const percent = Math.round((event.loaded / event.total) * 15);
-      setProgress(percent);
-      setProgressText("Dang gui file len server", `${formatBytes(event.loaded)} / ${formatBytes(event.total)}`);
+  (async () => {
+    const failures = [];
+    for (let index = 0; index < files.length; index += 1) {
+      button.textContent = `Dang upload ${index + 1}/${files.length}...`;
+      const data = new FormData();
+      data.append("progress_id", makeProgressId());
+      data.append("directory", currentDirectory);
+      data.append("file", files[index]);
+      try {
+        const response = await fetch("/upload", {method: "POST", body: data});
+        const payload = await response.json();
+        if (!response.ok || !payload.ok) throw new Error(payload.message || "Upload that bai");
+        setProgress(((index + 1) / files.length) * 100);
+        setProgressText("Dang upload nhieu file", `${index + 1}/${files.length}: ${files[index].name}`);
+      } catch (error) { failures.push(`${files[index].name}: ${error.message}`); }
     }
-  });
-
-  request.addEventListener("load", () => {
     button.disabled = false;
     button.textContent = "Upload multipart";
-
-    let payload;
-    try {
-      payload = JSON.parse(request.responseText);
-    } catch {
-      closeProgressStream();
-      setResult("error", "Server tra ve du lieu khong hop le.");
-      return;
-    }
-
-    if (!payload.ok) {
-      closeProgressStream();
-      setProgress(0);
-      setProgressText("Upload loi", "");
-      setResult("error", payload.message || "Upload that bai.");
-      return;
-    }
-
-    closeProgressStream();
-    setProgress(100);
-    setProgressText("Upload hoan tat", `${payload.parts} part`);
-    setResult(
-      "ok",
-      `<strong>Upload thanh cong</strong><br>
-       Bucket: ${payload.bucket}<br>
-       Key: ${payload.key}<br>
-       Parts: ${payload.parts}<br>
-       <a href="${payload.url}" target="_blank" rel="noreferrer">Mo presigned URL</a><br>
-       <a href="/download?key=${encodeURIComponent(payload.key)}">Tai file ve</a>`
-    );
+    input.value = "";
+    showSelectedFile();
+    setResult(failures.length ? "error" : "ok", failures.length ? `Upload xong, co loi:<br>${failures.map(escapeHtml).join("<br>")}` : `Da upload thanh cong ${files.length} file.`);
     loadFiles();
-  });
-
-  request.addEventListener("error", () => {
-    closeProgressStream();
-    button.disabled = false;
-    button.textContent = "Upload multipart";
-    setProgress(0);
-    setProgressText("Upload loi", "");
-    setResult("error", "Khong ket noi duoc toi server.");
-  });
-
-  request.send(data);
+  })();
 });
 
 refreshFilesButton.addEventListener("click", loadFiles);
@@ -535,11 +514,92 @@ pagination.addEventListener("click", (event) => {
 });
 
 fileList.addEventListener("click", (event) => {
+  const shareButton = event.target.closest(".share-action");
+  if (shareButton) {
+    shareButton.disabled = true;
+    shareButton.textContent = "Dang tao...";
+    fetch("/share-link", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({key: shareButton.dataset.key, expires_in: 86400}),
+    })
+      .then((response) => response.json().then((payload) => ({response, payload})))
+      .then(async ({response, payload}) => {
+        if (!response.ok || !payload.ok) throw new Error(payload.message || "Khong tao duoc link.");
+        try {
+          await navigator.clipboard.writeText(payload.url);
+          setResult("ok", `<strong>Da copy link tai xuong.</strong><br>Link co hieu luc trong 24 gio.`);
+        } catch {
+          window.prompt("Copy link tai xuong (hieu luc 24 gio):", payload.url);
+        }
+      })
+      .catch((error) => setResult("error", escapeHtml(error.message)))
+      .finally(() => { shareButton.disabled = false; shareButton.textContent = "Copy link"; });
+    return;
+  }
+  const moveButton = event.target.closest(".move-action");
+  if (moveButton) {
+    const destination = window.prompt("Nhap duong dan moi (tinh tu thu muc goc):", currentDirectory ? `${currentDirectory}/${moveButton.dataset.name}` : moveButton.dataset.name);
+    if (destination && destination.trim()) {
+      fetch("/move", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({key: moveButton.dataset.key, destination: destination.trim()})})
+        .then((response) => response.json().then((payload) => ({response, payload})))
+        .then(({response, payload}) => { if (!response.ok || !payload.ok) throw new Error(payload.message); setResult("ok", `Da di chuyen thanh ${escapeHtml(payload.key)}.`); loadFiles(); })
+        .catch((error) => setResult("error", escapeHtml(error.message)));
+    }
+    return;
+  }
   const deleteButton = event.target.closest(".delete-action");
   if (!deleteButton) {
     return;
   }
   deleteFile(deleteButton.dataset.key);
+});
+
+breadcrumbs.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-dir]");
+  if (!button) return;
+  currentDirectory = button.dataset.dir;
+  selectedKeys.clear();
+  loadFiles();
+});
+
+folderList.addEventListener("click", (event) => {
+  const folder = event.target.closest("[data-folder]");
+  if (!folder) return;
+  currentDirectory = [currentDirectory, folder.dataset.folder].filter(Boolean).join("/");
+  selectedKeys.clear();
+  loadFiles();
+});
+
+createFolderButton.addEventListener("click", async () => {
+  const name = window.prompt("Ten thu muc moi:");
+  if (!name) return;
+  const response = await fetch("/folders", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({directory: currentDirectory, name})});
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) return setResult("error", escapeHtml(payload.message || "Khong tao duoc thu muc."));
+  setResult("ok", `Da tao thu muc ${escapeHtml(name)}.`);
+  loadFiles();
+});
+
+trashButton.addEventListener("click", async () => {
+  trashPanel.hidden = false;
+  trashList.innerHTML = '<div class="empty-state">Dang tai...</div>';
+  const response = await fetch("/trash");
+  const payload = await response.json();
+  if (!payload.ok) return trashList.innerHTML = `<div class="empty-state">${escapeHtml(payload.message)}</div>`;
+  trashList.innerHTML = payload.items.length ? payload.items.map((item) => `<article class="file-row"><div class="file-main"><strong>${escapeHtml(item.original)}</strong><span>${formatBytes(item.size)} - ${formatDate(item.last_modified)}</span></div><button class="file-action restore-action" data-trash-key="${escapeHtml(item.trash_key)}" type="button">Khoi phuc</button></article>`).join("") : '<div class="empty-state">Thung rac dang trong.</div>';
+});
+
+closeTrashButton.addEventListener("click", () => { trashPanel.hidden = true; });
+trashList.addEventListener("click", async (event) => {
+  const button = event.target.closest(".restore-action");
+  if (!button) return;
+  const response = await fetch("/trash/restore", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({trash_key: button.dataset.trashKey})});
+  const payload = await response.json();
+  if (!response.ok || !payload.ok) return setResult("error", escapeHtml(payload.message || "Khoi phuc that bai."));
+  button.closest(".file-row").remove();
+  setResult("ok", `Da khoi phuc ${escapeHtml(payload.key)}.`);
+  loadFiles();
 });
 
 fileList.addEventListener("change", (event) => {
