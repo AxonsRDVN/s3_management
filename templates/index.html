@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>S3 Multipart Upload</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="panel">
+        <div class="masthead">
+          <p class="eyebrow">AWS S3</p>
+          <h1>Multipart Upload</h1>
+          <p class="subtitle">Chon file va upload len bucket S3 qua backend Python.</p>
+        </div>
+
+        <form id="uploadForm" class="uploader">
+          <label class="dropzone" for="fileInput">
+            <input id="fileInput" name="file" type="file">
+            <span class="drop-icon">+</span>
+            <span class="drop-title">Chon file</span>
+            <span id="fileName" class="drop-meta">Chua co file nao duoc chon</span>
+          </label>
+
+          <button id="uploadButton" type="submit">Upload multipart</button>
+        </form>
+
+        <div class="progress-wrap" aria-live="polite">
+          <div id="progressBar" class="progress-bar"></div>
+        </div>
+        <div class="progress-info">
+          <strong id="progressPercent">0%</strong>
+          <span id="progressStage">Chua bat dau</span>
+          <span id="progressDetail"></span>
+        </div>
+
+        <section id="result" class="result" hidden></section>
+
+        <section class="file-section">
+          <div class="file-toolbar">
+            <div>
+              <h2>Danh sach file</h2>
+              <p id="fileListMeta">Dang tai danh sach...</p>
+            </div>
+            <div class="file-toolbar-actions">
+              <button id="selectAllButton" class="secondary-button" type="button">Chon tat ca</button>
+              <button id="selectPageButton" class="secondary-button" type="button">Chọn trang hiện tại</button>
+              <button id="downloadSelectedButton" class="secondary-button" type="button" disabled>Tải về đã chọn</button>
+              <button id="transcodeSelectedButton" class="secondary-button transcode-button" type="button" disabled>Chuyển đổi video đã chọn</button>
+              <button id="deleteSelectedButton" class="secondary-button danger-button" type="button" disabled>Xoa da chon</button>
+              <button id="deleteAllButton" class="secondary-button danger-button" type="button">Xoa tat ca</button>
+              <button id="refreshFilesButton" class="secondary-button" type="button">Tai lai</button>
+            </div>
+          </div>
+
+          <div class="list-controls">
+            <label>Tìm theo tên file
+              <input id="fileNameSearch" type="search" placeholder="Nhập tên file..." autocomplete="off">
+            </label>
+            <label>Loại nội dung
+              <select id="mediaTypeFilter">
+                <option value="all">Tất cả</option>
+                <option value="video">Video</option>
+                <option value="image">Hình ảnh</option>
+              </select>
+            </label>
+            <label>Số mục mỗi trang
+              <select id="pageSizeSelect">
+                <option value="5">5</option>
+                <option value="10" selected>10</option>
+                <option value="20">20</option>
+                <option value="50">50</option>
+              </select>
+            </label>
+          </div>
+          <section id="transcodeProgress" class="transcode-progress" hidden aria-live="polite">
+            <div class="transcode-progress-head">
+              <strong>Chuyển đổi sang H.264</strong>
+              <strong id="transcodePercent">0%</strong>
+            </div>
+            <div class="progress-wrap"><div id="transcodeProgressBar" class="progress-bar"></div></div>
+            <p id="transcodeStage">Đang chuẩn bị...</p>
+            <small id="transcodeDetail"></small>
+          </section>
+          <div id="fileList" class="file-list"></div>
+          <nav id="pagination" class="pagination" aria-label="Phân trang danh sách file"></nav>
+        </section>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>
