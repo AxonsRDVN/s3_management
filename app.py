@@ -1,4 +1,5 @@
 import json
+import io
 import math
 import mimetypes
 import os
@@ -116,6 +117,8 @@ from flask import (
     Flask, Response, jsonify, render_template, request,
     send_file, stream_with_context,
 )
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
 
 
 load_dotenv()
@@ -401,6 +404,18 @@ def safe_archive_name(prefix, key):
     relative_name = key[len(prefix):] if key.startswith(prefix) else posixpath.basename(key)
     parts = [part for part in relative_name.replace("\\", "/").split("/") if part not in ("", ".", "..")]
     return "/".join(parts) or safe_filename(posixpath.basename(key))
+
+
+def format_size(size):
+    value = float(size or 0)
+    units = ("B", "KB", "MB", "GB", "TB")
+    unit = units[0]
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            break
+        value /= 1024
+    decimals = 0 if unit == "B" else 2
+    return f"{value:.{decimals}f} {unit}"
 
 
 def upload_part_from_file(s3_client, bucket, key, upload_id, file_path, part_number, offset, size):
@@ -819,6 +834,91 @@ def download_multiple_files():
         return jsonify({"ok": False, "message": str(exc)}), 500
 
 
+@app.post("/export-selected")
+def export_selected_files():
+    keys = list(dict.fromkeys(key.strip() for key in request.form.getlist("keys") if key.strip()))
+    try:
+        config = get_s3_config()
+        prefix = clean_prefix(config["prefix"])
+        if not keys:
+            return jsonify({"ok": False, "message": "Vui long chon it nhat mot file."}), 400
+        if any(not key.startswith(prefix) or key.endswith("/") for key in keys):
+            return jsonify({"ok": False, "message": "Co key khong hop le hoac nam ngoai prefix."}), 400
+
+        client = get_s3_client(config["region"])
+        expiry_options = {
+            "3600": (3600, "1 giờ"), "21600": (21600, "6 giờ"),
+            "43200": (43200, "12 giờ"), "86400": (86400, "24 giờ"),
+            "259200": (259200, "3 ngày"), "604800": (604800, "7 ngày"),
+        }
+        expiry_choice = request.form.get("expires_in", "86400")
+        if expiry_choice not in expiry_options:
+            return jsonify({"ok": False, "message": "Thoi han link tai khong hop le."}), 400
+        expiry, expiry_label = expiry_options[expiry_choice]
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Danh sach file"
+        headers = [
+            "STT", "Tên file", "Đường dẫn S3", "Phần mở rộng", "Loại nội dung",
+            "Dung lượng (bytes)", "Dung lượng", "Cập nhật lần cuối", "ETag",
+            "Storage class", f"Link tải (hiệu lực {expiry_label})", "Link hết hạn sau (giây)",
+        ]
+        sheet.append(headers)
+        header_fill = PatternFill("solid", fgColor="1F6F54")
+        for cell in sheet[1]:
+            cell.font = Font(color="FFFFFF", bold=True)
+            cell.fill = header_fill
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        for index, key in enumerate(keys, start=1):
+            metadata = client.head_object(Bucket=config["bucket"], Key=key)
+            name = posixpath.basename(key)
+            extension = posixpath.splitext(name)[1].lstrip(".").lower()
+            size = int(metadata.get("ContentLength", 0))
+            last_modified = metadata.get("LastModified")
+            download_url = make_download_url(client, config["bucket"], key, expiry)
+            sheet.append([
+                index,
+                name,
+                key,
+                extension,
+                metadata.get("ContentType") or mimetypes.guess_type(name)[0] or "application/octet-stream",
+                size,
+                format_size(size),
+                last_modified.replace(tzinfo=None) if last_modified else "",
+                str(metadata.get("ETag", "")).strip('"'),
+                metadata.get("StorageClass", "STANDARD"),
+                download_url,
+                expiry,
+            ])
+            link_cell = sheet.cell(row=index + 1, column=11)
+            link_cell.hyperlink = download_url
+            link_cell.style = "Hyperlink"
+
+        sheet.freeze_panes = "A2"
+        sheet.auto_filter.ref = sheet.dimensions
+        sheet.column_dimensions["A"].width = 7
+        for column, width in {"B": 32, "C": 52, "D": 15, "E": 27, "F": 20, "G": 16, "H": 22, "I": 35, "J": 18, "K": 65, "L": 25}.items():
+            sheet.column_dimensions[column].width = width
+        for row in sheet.iter_rows(min_row=2):
+            row[7].number_format = "dd/mm/yyyy hh:mm:ss"
+            for cell in row:
+                cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        output = io.BytesIO()
+        workbook.save(output)
+        output.seek(0)
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        return send_file(
+            output,
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            as_attachment=True,
+            download_name=f"s3-files-{timestamp}.xlsx",
+        )
+    except (RuntimeError, BotoCoreError, ClientError, OSError, ValueError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
 @app.delete("/files")
 def delete_file():
     payload = request.get_json(silent=True) or {}
@@ -916,18 +1016,84 @@ def restore_trash():
     payload = request.get_json(silent=True) or {}
     try:
         config = get_s3_config()
-        trash_key = str(payload.get("trash_key", ""))
         trash_prefix = f"{clean_prefix(config['prefix'])}.trash/"
-        if not trash_key.startswith(trash_prefix):
-            return jsonify({"ok": False, "message": "Key thung rac khong hop le."}), 400
-        rest = trash_key[len(trash_prefix):]
-        original = rest.split("/", 1)[1] if "/" in rest else ""
-        destination = managed_key(config, original)
+        keys = payload.get("trash_keys") or []
+        single_key = payload.get("trash_key")
+        if single_key and not keys:
+            keys = [single_key]
+        if isinstance(keys, str):
+            keys = [keys]
+
+        normalized_keys = [str(k).strip() for k in keys if str(k).strip()]
+        if not normalized_keys:
+            return jsonify({"ok": False, "message": "Không có file nào để khôi phục."}), 400
+
+        for tk in normalized_keys:
+            if not tk.startswith(trash_prefix):
+                return jsonify({"ok": False, "message": "Key thùng rác không hợp lệ."}), 400
+
         client = get_s3_client(config["region"])
-        copy_then_delete(client, config["bucket"], trash_key, destination)
-        return jsonify({"ok": True, "key": destination})
+        restored = []
+        for tk in normalized_keys:
+            rest = tk[len(trash_prefix):]
+            original = rest.split("/", 1)[1] if "/" in rest else rest
+            destination = managed_key(config, original)
+            copy_then_delete(client, config["bucket"], tk, destination)
+            restored.append(destination)
+
+        return jsonify({"ok": True, "restored": len(restored), "keys": restored})
     except (ValueError, RuntimeError, BotoCoreError, ClientError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 400
+
+
+@app.post("/trash/delete-permanent")
+def delete_trash_permanent():
+    payload = request.get_json(silent=True) or {}
+    try:
+        config = get_s3_config()
+        trash_prefix = f"{clean_prefix(config['prefix'])}.trash/"
+        keys = payload.get("trash_keys") or []
+        single_key = payload.get("trash_key")
+        if single_key and not keys:
+            keys = [single_key]
+        if isinstance(keys, str):
+            keys = [keys]
+
+        normalized_keys = [str(k).strip() for k in keys if str(k).strip()]
+        if not normalized_keys:
+            return jsonify({"ok": False, "message": "Không có file nào để xóa vĩnh viễn."}), 400
+
+        for tk in normalized_keys:
+            if not tk.startswith(trash_prefix):
+                return jsonify({"ok": False, "message": "Key thùng rác không hợp lệ."}), 400
+
+        client = get_s3_client(config["region"])
+        deleted_count = delete_s3_objects(client, config["bucket"], normalized_keys)
+        return jsonify({"ok": True, "deleted": deleted_count})
+    except (ValueError, RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+
+
+@app.post("/trash/empty")
+def empty_trash():
+    try:
+        config = get_s3_config()
+        trash_prefix = f"{clean_prefix(config['prefix'])}.trash/"
+        client = get_s3_client(config["region"])
+
+        trash_keys = []
+        paginator = client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=config["bucket"], Prefix=trash_prefix):
+            for item in page.get("Contents", []):
+                trash_keys.append(item["Key"])
+
+        if not trash_keys:
+            return jsonify({"ok": True, "deleted": 0, "message": "Thùng rác đã trống."})
+
+        deleted_count = delete_s3_objects(client, config["bucket"], trash_keys)
+        return jsonify({"ok": True, "deleted": deleted_count})
+    except (RuntimeError, BotoCoreError, ClientError) as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
 
 
 @app.get("/progress/<progress_id>")
