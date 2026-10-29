@@ -331,7 +331,10 @@ function renderFolders() {
         <div class="folder-card-icon">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         </div>
-        <span class="folder-card-name" title="${escapeHtml(folder.name)}">${escapeHtml(folder.name)}</span>
+        <div class="folder-card-details">
+          <span class="folder-card-name" title="${escapeHtml(folder.name)}">${escapeHtml(folder.name)}</span>
+          <span class="folder-card-meta">${formatBytes(folder.size || 0)} · ${folder.file_count || 0} file${folder.file_count === 1 ? "" : "s"}</span>
+        </div>
       </div>
     `).join("");
   } else {
@@ -468,9 +471,16 @@ function renderFileList() {
         <td class="file-date-td"><span class="file-date-cell">${formatDate(file.last_modified)}</span></td>
         <td>
           <div class="file-actions-cell">
-            <a class="file-action-btn view-btn" href="/play?key=${encodeURIComponent(file.key)}" target="_blank" rel="noreferrer" data-tooltip="Preview">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+            <a class="file-action-btn view-btn" href="/play?key=${encodeURIComponent(file.key)}" target="_blank" rel="noreferrer" data-tooltip="${getMediaType(file) === 'video' ? 'Phát video' : 'Xem'}">
+              ${getMediaType(file) === 'video' 
+                ? `<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="6 4 20 12 6 20 6 4"/></svg>` 
+                : `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>`}
             </a>
+            ${getMediaType(file) === 'video' ? `
+            <button class="file-action-btn convert-action" type="button" data-key="${escapeHtml(file.key)}" data-tooltip="Chuyển đổi Video">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            </button>
+            ` : ''}
             <a class="file-action-btn download-btn" href="/download?key=${encodeURIComponent(file.key)}" data-tooltip="Download">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
             </a>
@@ -549,11 +559,12 @@ async function loadFiles() {
     selectedKeys = new Set([...selectedKeys].filter((key) => remainingKeys.has(key)));
 
     // Update storage summary dynamically
-    const totalBytes = allFiles.reduce((sum, f) => sum + (f.size || 0), 0);
+    const totalBytes = payload.total_size || 0;
+    const totalFiles = payload.total_files || 0;
     const storageUsedElem = document.querySelector("#totalStorageUsed");
     const storageCountElem = document.querySelector("#totalStorageCount");
     if (storageUsedElem) storageUsedElem.textContent = formatBytes(totalBytes);
-    if (storageCountElem) storageCountElem.textContent = `${allFiles.length} file${allFiles.length !== 1 ? "s" : ""} in folder`;
+    if (storageCountElem) storageCountElem.textContent = `${totalFiles} file${totalFiles !== 1 ? "s" : ""} in folder`;
 
     currentPage = 1;
     renderFileList();
@@ -765,12 +776,8 @@ exportSelectedButton.addEventListener("click", () => {
   exportForm.remove();
 });
 
-// Transcode Selected
-transcodeSelectedButton.addEventListener("click", async () => {
-  const keys = [...selectedKeys].filter((key) => {
-    const file = allFiles.find((item) => item.key === key);
-    return file && getMediaType(file) === "video";
-  });
+// Transcode Function
+async function transcodeVideos(keys) {
   if (!keys.length || transcodeRunning) return;
 
   const progressId = makeProgressId();
@@ -778,8 +785,8 @@ transcodeSelectedButton.addEventListener("click", async () => {
   transcodeProgress.hidden = false;
   transcodeProgressBar.style.width = "0%";
   transcodePercent.textContent = "0%";
-  transcodeStage.textContent = "Sending video list...";
-  transcodeDetail.textContent = `${keys.length} video(s)`;
+  transcodeStage.textContent = "Đang gửi danh sách video...";
+  transcodeDetail.textContent = `${keys.length} video`;
   syncSelectionState();
 
   try {
@@ -789,7 +796,7 @@ transcodeSelectedButton.addEventListener("click", async () => {
       body: JSON.stringify({ progress_id: progressId, keys }),
     });
     const payload = await response.json();
-    if (!response.ok || !payload.ok) throw new Error(payload.message || "Cannot start conversion.");
+    if (!response.ok || !payload.ok) throw new Error(payload.message || "Không thể bắt đầu chuyển đổi.");
 
     transcodeSource = new EventSource(`/progress/${progressId}`);
     transcodeSource.onmessage = (event) => {
@@ -807,8 +814,8 @@ transcodeSelectedButton.addEventListener("click", async () => {
         setResult(
           failures.length ? "error" : "ok",
           failures.length
-            ? `Converted ${progress.completed}/${progress.total} videos.<br>${failures.map((item) => `<strong>${escapeHtml(item.key)}</strong><br>${escapeHtml(item.message)}`).join("<br><br>")}`
-            : `Successfully processed ${progress.completed}/${progress.total} video(s) to browser-compatible format.`
+            ? `Chuyển đổi ${progress.completed}/${progress.total} video.<br>${failures.map((item) => `<strong>${escapeHtml(item.key)}</strong><br>${escapeHtml(item.message)}`).join("<br><br>")}`
+            : `Đã chuyển đổi thành công ${progress.completed}/${progress.total} video sang định dạng tương thích trình duyệt.`
         );
       }
     };
@@ -820,11 +827,20 @@ transcodeSelectedButton.addEventListener("click", async () => {
     };
   } catch (error) {
     transcodeRunning = false;
-    transcodeStage.textContent = "Conversion failed";
+    transcodeStage.textContent = "Chuyển đổi thất bại";
     transcodeDetail.textContent = error.message;
     setResult("error", escapeHtml(error.message));
     syncSelectionState();
   }
+}
+
+// Transcode Selected
+transcodeSelectedButton.addEventListener("click", () => {
+  const keys = [...selectedKeys].filter((key) => {
+    const file = allFiles.find((item) => item.key === key);
+    return file && getMediaType(file) === "video";
+  });
+  transcodeVideos(keys);
 });
 
 // Delete All
@@ -948,6 +964,13 @@ fileList.addEventListener("click", (e) => {
           .catch((error) => setResult("error", escapeHtml(error.message)));
       }
     });
+    return;
+  }
+
+  // Convert single video
+  const convertButton = e.target.closest(".convert-action");
+  if (convertButton) {
+    transcodeVideos([convertButton.dataset.key]);
     return;
   }
 

@@ -648,6 +648,19 @@ a { text-decoration: none; color: inherit; }
   min-width: 0;
 }
 
+.folder-card-details {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.folder-card-meta {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 /* ═══ File Section Header & Toolbar ═══ */
 .file-section {
   margin-top: 8px;
@@ -937,7 +950,7 @@ a { text-decoration: none; color: inherit; }
 }
 
 .file-table thead th:first-child { width: 44px; text-align: center; }
-.file-table thead th:last-child { width: 140px; text-align: right; }
+.file-table thead th:last-child { width: 190px; text-align: right; }
 
 .file-table tbody tr {
   border-bottom: 1px solid var(--border-light);
@@ -960,7 +973,7 @@ a { text-decoration: none; color: inherit; }
 }
 
 .file-table td:first-child { text-align: center; width: 44px; }
-.file-table td:last-child { text-align: right; width: 140px; }
+.file-table td:last-child { text-align: right; width: 190px; }
 
 .file-checkbox {
   width: 17px;
@@ -1072,6 +1085,7 @@ a { text-decoration: none; color: inherit; }
 .file-action-btn svg { width: 16px; height: 16px; }
 
 .file-action-btn.view-btn:hover { color: var(--primary); background: var(--primary-light); }
+.file-action-btn.convert-action:hover { color: #D97706; background: #FFFBEB; }
 .file-action-btn.download-btn:hover { color: var(--info); background: var(--info-light); }
 .file-action-btn.delete-action:hover { color: var(--danger); background: var(--danger-light); }
 

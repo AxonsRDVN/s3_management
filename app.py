@@ -591,34 +591,36 @@ def list_files():
         directory = request.args.get("directory", "")
         prefix = clean_prefix(managed_key(config, directory))
         files = []
-        folders = set()
-        continuation_token = None
-
-        while True:
-            params = {
-                "Bucket": config["bucket"],
-                "Prefix": prefix,
-                "Delimiter": "/",
-                "MaxKeys": 1000,
-            }
-            if continuation_token:
-                params["ContinuationToken"] = continuation_token
-
-            response = s3_client.list_objects_v2(**params)
-            for common in response.get("CommonPrefixes", []):
-                folder_key = common.get("Prefix", "")
-                if folder_key and not folder_key.startswith(f"{base_prefix}.trash/") and not folder_key.startswith(f"{base_prefix}.web-compatible/"):
-                    folders.add(folder_key)
-            for item in response.get("Contents", []):
+        folders = {}
+        total_size = 0
+        total_files = 0
+        paginator = s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=config["bucket"], Prefix=prefix):
+            for item in page.get("Contents", []):
                 key = item["Key"]
                 if key.endswith("/") or key.startswith(f"{prefix}.web-compatible/"):
+                    continue
+
+                size = item.get("Size", 0)
+                total_size += size
+                total_files += 1
+                relative_name = key[len(prefix):] if key.startswith(prefix) else key
+                folder_name, separator, _ = relative_name.partition("/")
+
+                if separator:
+                    folder = folders.setdefault(
+                        folder_name,
+                        {"key": f"{prefix}{folder_name}/", "name": folder_name, "size": 0, "file_count": 0},
+                    )
+                    folder["size"] += size
+                    folder["file_count"] += 1
                     continue
 
                 files.append(
                     {
                         "key": key,
-                        "name": key[len(prefix) :] if key.startswith(prefix) else key,
-                        "size": item.get("Size", 0),
+                        "name": relative_name,
+                        "size": size,
                         "last_modified": item["LastModified"].isoformat(),
                         "url": make_presigned_url(
                             s3_client,
@@ -629,13 +631,21 @@ def list_files():
                     }
                 )
 
-            if not response.get("IsTruncated"):
-                break
-            continuation_token = response.get("NextContinuationToken")
-
         files.sort(key=lambda item: item["last_modified"], reverse=True)
-        folder_items = [{"key": key, "name": key[len(prefix):].rstrip("/")} for key in sorted(folders)]
-        return jsonify({"ok": True, "bucket": config["bucket"], "base_prefix": base_prefix, "prefix": prefix, "directory": directory, "folders": folder_items, "files": files})
+        folder_items = [folders[name] for name in sorted(folders)]
+        return jsonify(
+            {
+                "ok": True,
+                "bucket": config["bucket"],
+                "base_prefix": base_prefix,
+                "prefix": prefix,
+                "directory": directory,
+                "folders": folder_items,
+                "files": files,
+                "total_size": total_size,
+                "total_files": total_files,
+            }
+        )
     except (RuntimeError, BotoCoreError, ClientError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 500
 
@@ -650,27 +660,20 @@ def play_file():
             return jsonify({"ok": False, "message": "Key khong hop le hoac nam ngoai prefix."}), 400
 
         s3_client = get_s3_client(config["region"])
-        if not is_video_key(key):
-            return app.redirect(make_presigned_url(
-                s3_client, config["bucket"], key, config["url_expiry"]
-            ))
-
-        cached_key, _ = find_cached_video(s3_client, config, key)
-        if cached_key:
-            return app.redirect(make_presigned_url(
-                s3_client, config["bucket"], cached_key, config["url_expiry"]
-            ))
-
-        with TRANSCODE_LOCK:
-            output_key, _ = transcode_s3_video(s3_client, config, key)
+        if is_video_key(key):
+            try:
+                cached_key, _ = find_cached_video(s3_client, config, key)
+                if cached_key:
+                    return app.redirect(make_presigned_url(
+                        s3_client, config["bucket"], cached_key, config["url_expiry"]
+                    ))
+            except Exception:
+                pass
 
         return app.redirect(make_presigned_url(
-            s3_client, config["bucket"], output_key, config["url_expiry"]
+            s3_client, config["bucket"], key, config["url_expiry"]
         ))
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or str(exc))[-1500:]
-        return jsonify({"ok": False, "message": "FFmpeg khong the chuyen codec video.", "detail": detail}), 500
-    except (OSError, ValueError, RuntimeError, BotoCoreError, ClientError) as exc:
+    except (RuntimeError, BotoCoreError, ClientError) as exc:
         return jsonify({"ok": False, "message": str(exc)}), 500
 
 
